@@ -38,7 +38,7 @@ func main() {
 
 	r := mux.NewRouter()
 	r.HandleFunc("/", indexHandler).Methods("GET")
-	r.HandleFunc("/populateDataTable", paging).Methods("POST")
+	r.HandleFunc("/populateDataTable", pagingHandler).Methods("POST")
 	http.Handle("/", r)
 	_ = http.ListenAndServe(":8080", nil)
 }
@@ -106,15 +106,13 @@ func search(query string, args []interface{}) (dataList []Room) {
 	return dataList
 }
 
-// Here we store the recordsTotal and recordsFiltered value
-var final int
-
-func paging(w http.ResponseWriter, r *http.Request) {
+func pagingHandler(w http.ResponseWriter, r *http.Request) {
 	var (
 		paging       PaginateDataStruct
 		result       []Room
 		count, query string
 		args         []interface{}
+		final        int
 	)
 
 	err := r.ParseForm()
@@ -167,7 +165,7 @@ func paging(w http.ResponseWriter, r *http.Request) {
 			WHERE name LIKE ? 
 			ORDER BY name`, aux...).Rows()
 		if err != nil {
-			log.Fatalf("Fatal error: %v", err)
+			log.Panicf("Fatal error: %v", err)
 		}
 
 		defer func() {
@@ -196,7 +194,7 @@ func paging(w http.ResponseWriter, r *http.Request) {
 	paging.Data = result
 	paging.Draw = draw
 	paging.RecordsFiltered = final
-	
+
 	e, err := json.Marshal(paging)
 	if err != nil {
 		log.Fatalf("Fatal error: %v", err)
@@ -206,9 +204,10 @@ func paging(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+
 	_, err = w.Write(e)
 	if err != nil {
-		return 
+		return
 	}
 
 }
