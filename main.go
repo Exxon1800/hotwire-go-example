@@ -106,13 +106,14 @@ func search(query string, args []interface{}) (dataList []Room) {
 	return dataList
 }
 
+var final int
+
 func pagingHandler(w http.ResponseWriter, r *http.Request) {
 	var (
 		paging       PaginateDataStruct
 		result       []Room
 		count, query string
 		args         []interface{}
-		final        int
 	)
 
 	err := r.ParseForm()
