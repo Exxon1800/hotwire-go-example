@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+    <script type="text/javascript" charset="utf8" src="//cdn.datatables.net/1.10.15/js/jquery.dataTables.js"></script>
+    <link rel="stylesheet" type="text/css" href="//cdn.datatables.net/1.10.12/css/jquery.dataTables.min.css">
+</head>
+
+<body>
+
+<h1>Rooms</h1>
+
+<table id="example" class="display" style="width:500px">
+    <thead>
+    <tr>
+        <th>room</th>
+    </tr>
+    </thead>
+    <tfoot>
+        <tr>
+            <td></td>
+        </tr>
+    </tfoot>
+</table>
+
+<br>
+
+<a href="/rooms/new">New Room</a>
+
+<script>
+    $(document).ready(function () {
+        $('#example').DataTable({
+            "bSort": false,
+            "processing": true,
+            "serverSide": true,
+            "ajax":{
+                url :"/populateDataTable", // json datasource
+                type: "post",  // method  , by default get
+            },
+            "columns": [
+                { "data": "name", className: "text-center", "name":"room" },
+            ]
+        });
+    });
+    // $(document).ready(function () {
+    //     $('#example').DataTable();
+    // });
+</script>
+</body>
+</html>

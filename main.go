@@ -1,77 +1,246 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"strconv"
-
-	"github.com/go-chi/chi"
-	"github.com/go-chi/chi/middleware"
+	"github.com/gorilla/mux"
+	log "github.com/sirupsen/logrus"
 	"github.com/while1malloc0/hotwire-go-example/models"
-	"github.com/while1malloc0/hotwire-go-example/routes"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"html/template"
+	"io"
+	"net/http"
 )
+
+type Page struct {
+	Title string
+	Body  string
+}
+
+type PaginateDataStruct struct {
+	Draw            string `json:"draw"`
+	RecordsTotal    int    `json:"recordsTotal"`
+	RecordsFiltered int    `json:"recordsFiltered"`
+	Data            []Room `json:"data"`
+}
+
+type Room struct {
+	Name string `json:"name"`
+}
+
+var db *gorm.DB
 
 func main() {
 	log.Println("Starting app")
 
-	setupDB()
+	db = setupDB()
 
-	router := registerRoutes()
+	r := mux.NewRouter()
+	r.HandleFunc("/", indexHandler).Methods("GET")
+	r.HandleFunc("/populateDataTable", paging).Methods("POST")
+	http.Handle("/", r)
+	_ = http.ListenAndServe(":8080", nil)
+}
 
-	port := getPort()
-	log.Printf("Serving on port %d", port)
+//search function returns the result of the query
+func search(query string, args []interface{}) (dataList []Room) {
+	var room Room
+	rows, err := db.Raw(query, args...).Rows()
+	if err != nil {
+		panic(err)
+	}
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
-		log.Fatal(err)
+	columns, err := rows.Columns()
+	if err != nil {
+		panic(err)
+	}
+
+	values := make([]sql.RawBytes, len(columns))
+	// rows.Scan wants '[]interface{}' as an argument, so we must copy the
+	// references into such a slice
+	// See http://code.google.com/p/go-wiki/wiki/InterfaceSlice for details
+	scanArgs := make([]interface{}, len(values))
+	for i := range values {
+		scanArgs[i] = &values[i]
+	}
+	for rows.Next() {
+		// get RawBytes from data
+		err = rows.Scan(scanArgs...)
+		if err != nil {
+			panic(err)
+		}
+		var value string
+
+		for i, col := range values {
+			// Here we can check if the value is nil (NULL value)
+			if col == nil {
+				value = "NULL"
+			} else {
+				value = string(col)
+			}
+			//if columns[i] == "id" {
+			//	room.ID = value
+			//}
+			if columns[i] == "name" {
+				room.Name = value
+			}
+		}
+
+		dataList = append(dataList, room)
+	}
+
+	return dataList
+}
+
+// Here we store the recordsTotal and recordsFiltered value
+var final int
+
+func paging(w http.ResponseWriter, r *http.Request) {
+	var (
+		paging PaginateDataStruct
+		result []Room
+		count, query  string
+		args   []interface{}
+	)
+
+	if r.Method == "POST" {
+		r.ParseForm()
+		count = `SELECT count(*) as frequency FROM rooms`
+		start := r.FormValue("start")
+		end := r.FormValue("length")
+		draw := r.FormValue("draw")
+		searchValue := r.FormValue("search[value]")
+
+		if draw == "1" {
+			rows, err := db.Raw(count).Rows()
+			if err != nil {
+				fmt.Printf("QueryRow: %v\n", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				err = rows.Scan(&final)
+				if err != nil {
+					fmt.Println(err)
+				}
+			}
+		}
+		log.Infof("Records Filtered: %d", final)
+
+		if searchValue != "" {
+			query = `SELECT name FROM rooms
+						WHERE name LIKE ? 
+						ORDER BY name
+						Limit ? , ?;`
+			p := searchValue + "%"
+			args = []interface{}{p, start, end}
+			aux := []interface{}{p}
+			result = search(query, args)
+
+			// Here we obtain the number of results
+			rows,err := db.Raw(`SELECT COUNT(*) FROM rooms
+			WHERE name LIKE ? 
+			ORDER BY name`, aux...).Rows()
+			if err != nil {
+				fmt.Printf("QueryRow: %v\n", err)
+			}
+
+			defer rows.Close()
+			for rows.Next() {
+				err = rows.Scan(&final)
+				if err != nil {
+					fmt.Println(err)
+				}
+			}
+		} else {
+			query = `SELECT name FROM rooms
+			ORDER BY name
+			Limit ? , ?;`
+			args = []interface{}{start, end}
+			result = search(query, args)
+		}
+
+		paging.Data = result
+		paging.Draw = draw
+		paging.RecordsFiltered = final
+		e, err := json.Marshal(paging)
+		if err != nil {
+			fmt.Println(err)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(e)
+	} else {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func registerRoutes() http.Handler {
-	log.Println("Registering routes")
-	r := chi.NewMux()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	routes.Register(r)
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	p := Page{
+		Title: "pagination",
+	}
 
-	r.Handle("/public/*", http.StripPrefix("/public/", http.FileServer(http.Dir("./public"))))
+	t, err := template.ParseFiles("templates/index.html")
+	ifErrorToPage(w, r, err)
 
-	logRoutes(r)
-
-	return r
+	err = t.Execute(w, p)
+	ifErrorToPage(w, r, err)
 }
 
-func logRoutes(r chi.Router) {
-	log.Println("Serving with routes")
-	chi.Walk(r, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
-		log.Println(method, route)
-		return nil
+func setupDB() *gorm.DB {
+	db, err := gorm.Open(sqlite.Open("chat.db"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
-}
 
-func setupDB() {
 	log.Println("Running migrations")
-	err := models.Migrate()
+
+	err = models.Migrate()
 	if err != nil {
 		log.Fatalf("Fatal error: %v", err)
 	}
 
 	log.Println("Seeding database")
+
 	err = models.Seed()
 	if err != nil {
 		log.Fatalf("Fatal error: %v", err)
 	}
+
+	return db
 }
 
-func getPort() int {
-	port := 8080
-	if p, ok := os.LookupEnv("HOTWIRE_CHAT_PORT"); ok {
-		parsed, err := strconv.Atoi(p)
-		if err != nil {
-			log.Fatalf("Fatal error: %v", err)
+func ifErrorToPage(w io.Writer, r *http.Request, err error) {
+	if err != nil {
+		t, err := template.ParseFiles("templates/Error.html")
+		if logIfError(r, err) {
+			return
 		}
-		port = parsed
+
+		err = t.Execute(w, err)
+		if logIfError(r, err) {
+			return
+		}
 	}
-	return port
+}
+
+func logIfError(r *http.Request, err error) bool {
+	if err != nil {
+		logError(r, err)
+
+		return true
+	}
+
+	return false
+}
+
+func logError(r *http.Request, err error) *log.Entry {
+	return GetLogger(r).WithError(err)
+}
+
+func GetLogger(r *http.Request) *log.Entry {
+	return r.Context().Value("logger").(*log.Entry)
 }
