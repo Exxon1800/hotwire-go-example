@@ -61,7 +61,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 			return nil, err
 		}
 
-		rows, err = db.Debug().
+		rows, err = db.
 			Table(tableName).
 			Select(sortingField.databaseName).
 			Where(fmt.Sprintf("%s LIKE ?", sortingField.databaseName), args...).
@@ -70,7 +70,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 			Limit(limit).
 			Rows()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not execute filtered search query %w", err)
 		}
 	case noSearchValueInArgs:
 		limit, offset, err := getLimitAndOffset(args)
@@ -86,7 +86,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 			Limit(limit).
 			Rows()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not execute search query %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("incorrect argument list size for args %v", args)
@@ -99,12 +99,12 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 	}()
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("row error occurred %w", err)
 	}
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not get row.Columns %w", err)
 	}
 
 	values := make([]sql.RawBytes, len(columns))
@@ -148,12 +148,12 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 func getLimitAndOffset(args []interface{}) (int, int, error) {
 	limit, err := strconv.Atoi(fmt.Sprintf("%v", args[len(args)-1]))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("could not convert limit string to int %w", err)
 	}
 
 	offset, err := strconv.Atoi(fmt.Sprintf("%v", args[len(args)-2]))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("could not convert offset string to int %w", err)
 	}
 
 	return limit, offset, nil
@@ -178,7 +178,7 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 
 	err := r.ParseForm()
 	if err != nil {
-		return err
+		return fmt.Errorf("could not parse form %w", err)
 	}
 
 	start := r.FormValue("start")
@@ -189,7 +189,7 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 	if draw == firstDraw {
 		rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
 		if err != nil {
-			return err
+			return fmt.Errorf("could not execute query to get the rowcount of the entire '%v' table %w", tableName, err)
 		}
 
 		defer func() {
@@ -197,14 +197,15 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 
 			err = rows.Err()
 		}()
+
 		if err != nil {
-			return err
+			return fmt.Errorf("row error occurred %w", err)
 		}
 
 		for rows.Next() {
 			err = rows.Scan(&final)
 			if err != nil {
-				return err
+				return fmt.Errorf("could not scan row to &final %w", err)
 			}
 		}
 	}
@@ -227,7 +228,7 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 			Order(dtFields[0].databaseName).
 			Rows()
 		if err != nil {
-			return err
+			return fmt.Errorf("could not execute query to get the number of results %w", err)
 		}
 
 		defer func() {
@@ -237,13 +238,13 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 		}()
 
 		if err != nil {
-			return err
+			return fmt.Errorf("row error occurred %w", err)
 		}
 
 		for rows.Next() {
 			err = rows.Scan(&final)
 			if err != nil {
-				return err
+				return fmt.Errorf("could not scan row to &final %w", err)
 			}
 		}
 	} else {
@@ -260,7 +261,7 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 
 	jsonData, err := json.Marshal(pagingData)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not marshal pagingData %w", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -268,7 +269,7 @@ func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields [
 
 	_, err = w.Write(jsonData)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not write json data to the connection %w", err)
 	}
 
 	return nil
