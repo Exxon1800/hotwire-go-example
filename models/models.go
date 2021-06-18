@@ -15,6 +15,7 @@ func init() {
 	if DB == nil {
 		DB, err = gorm.Open(sqlite.Open("chat.db"), &gorm.Config{})
 	}
+
 	if err != nil {
 		panic(err)
 	}

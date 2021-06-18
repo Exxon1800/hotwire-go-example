@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
 	"github.com/while1malloc0/hotwire-go-example/models"
@@ -11,6 +12,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 type Page struct {
@@ -44,26 +46,68 @@ func main() {
 }
 
 // search function returns the result of the query
-func search(query string, args []interface{}) (dataList []Room) {
+func search(field string, args []interface{}) (dataList []Room, err error) {
 	var room Room
+	//query = `SELECT name FROM rooms WHERE name LIKE ? ORDER BY name Limit ? , ?;`
+	//rows, err := db.Raw(query, args...).Rows()
 
-	rows, err := db.Raw(query, args...).Rows()
-	if err != nil {
-		panic(err)
+	var (
+		rows                *sql.Rows
+		noSearchValueInArgs = 2
+		searchValueInArgs   = 3
+	)
+
+	switch len(args) {
+	case searchValueInArgs:
+		limit, offset, err := getLimitAndOffset(args)
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err = db.Debug().
+			Model(&models.Room{}).
+			Select(field).
+			Where(fmt.Sprintf("%s LIKE ?", field), args...).
+			Order(field).
+			Offset(offset).
+			Limit(limit).
+			Rows()
+		if err != nil {
+			return nil, err
+		}
+	case noSearchValueInArgs:
+		limit, offset, err := getLimitAndOffset(args)
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err = db.Debug().
+			Model(&models.Room{}).
+			Select(field).
+			Order(field).
+			Offset(offset).
+			Limit(limit).
+			Rows()
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("incorrect argument list size for args %v", args)
 	}
 
 	defer func() {
 		_ = rows.Close()
 
 		err = rows.Err()
-		if err != nil {
-			log.Fatalf("Fatal error: %v", err)
-		}
 	}()
+
+	if err != nil {
+		return nil, err
+	}
 
 	columns, err := rows.Columns()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	values := make([]sql.RawBytes, len(columns))
@@ -103,25 +147,43 @@ func search(query string, args []interface{}) (dataList []Room) {
 		dataList = append(dataList, room)
 	}
 
-	return dataList
+	return dataList, nil
+}
+
+func getLimitAndOffset(args []interface{}) (int, int, error) {
+	limit, err := strconv.Atoi(fmt.Sprintf("%v", args[len(args)-1]))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	offset, err := strconv.Atoi(fmt.Sprintf("%v", args[len(args)-2]))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return limit, offset, nil
 }
 
 var final int
 
-func pagingHandler(w http.ResponseWriter, r *http.Request) {
+func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
+	err := paging(w, r, []string{"name"})
+	if err != nil {
+		panic(err)
+	}
+}
+
+func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) error {
 	var (
-		paging       PaginateDataStruct
-		result       []Room
-		count, query string
-		args         []interface{}
+		pagingData PaginateDataStruct
+		result     []Room
+		args       []interface{}
 	)
 
 	err := r.ParseForm()
 	if err != nil {
-		log.Fatalf("Fatal error: %v", err)
+		return err
 	}
-
-	count = `SELECT count(*) as frequency FROM rooms`
 
 	start := r.FormValue("start")
 	end := r.FormValue("length")
@@ -129,78 +191,83 @@ func pagingHandler(w http.ResponseWriter, r *http.Request) {
 	searchValue := r.FormValue("search[value]")
 
 	if draw == "1" {
-		rows, err := db.Raw(count).Rows()
+		rows, err := db.Model(&models.Room{}).Select("COUNT(*)").Rows()
 		if err != nil {
-			log.Fatalf("Fatal error: %v", err)
+			return err
 		}
 
 		defer func() {
 			_ = rows.Close()
 
 			err = rows.Err()
-			if err != nil {
-				log.Fatalf("Fatal error: %v", err)
-			}
 		}()
+		if err != nil {
+			return err
+		}
 
 		for rows.Next() {
 			err = rows.Scan(&final)
 			if err != nil {
-				log.Panicf("Fatal error: %v", err)
+				return err
 			}
 		}
 	}
 
 	if searchValue != "" {
-		query = `SELECT name FROM rooms
-						WHERE name LIKE ? 
-						ORDER BY name
-						Limit ? , ?;`
+		//query = `SELECT name FROM rooms WHERE name LIKE ? ORDER BY name Limit ? , ?;`
 		p := searchValue + "%"
 		args = []interface{}{p, start, end}
 		aux := []interface{}{p}
-		result = search(query, args)
+		result, err = search(dataTablesFields[0], args)
+		if err != nil {
+			return err
+		}
 
 		// Here we obtain the number of results
-		rows, err := db.Raw(`SELECT COUNT(*) FROM rooms
-			WHERE name LIKE ? 
-			ORDER BY name`, aux...).Rows()
+		rows, err := db.Debug().
+			Model(&models.Room{}).
+			Select("COUNT(*)").
+			Where(generateDTWhereQuery(dataTablesFields), aux...).
+			Order(dataTablesFields[0]).
+			Rows()
 		if err != nil {
-			log.Panicf("Fatal error: %v", err)
+			return err
 		}
 
 		defer func() {
 			_ = rows.Close()
 
 			err = rows.Err()
-			if err != nil {
-				log.Fatalf("Fatal error: %v", err)
-			}
 		}()
+
+		if err != nil {
+			return err
+		}
 
 		for rows.Next() {
 			err = rows.Scan(&final)
 			if err != nil {
-				log.Fatalf("Fatal error: %v", err)
+				return err
 			}
 		}
 	} else {
-		query = `SELECT name FROM rooms
-			ORDER BY name
-			Limit ? , ?;`
+		//query = `SELECT name FROM rooms
+		//	ORDER BY name
+		//	Limit ? , ?;`
 		args = []interface{}{start, end}
-		result = search(query, args)
+		result, err = search(dataTablesFields[0], args)
+		if err != nil {
+			return err
+		}
 	}
 
-	paging.Data = result
-	paging.Draw = draw
-	paging.RecordsFiltered = final
+	pagingData.Data = result
+	pagingData.Draw = draw
+	pagingData.RecordsFiltered = final
 
-	e, err := json.Marshal(paging)
+	e, err := json.Marshal(pagingData)
 	if err != nil {
-		log.Fatalf("Fatal error: %v", err)
-
-		return
+		return err
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -208,9 +275,20 @@ func pagingHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, err = w.Write(e)
 	if err != nil {
-		return
+		return err
 	}
 
+	return nil
+}
+
+func generateDTWhereQuery(dataTablesFields []string) string {
+	whereQuery := fmt.Sprintf("%s like ? ", dataTablesFields[0])
+
+	for _, field := range dataTablesFields[1:] {
+		whereQuery += fmt.Sprintf("OR %s like ? ", field)
+	}
+
+	return whereQuery
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
