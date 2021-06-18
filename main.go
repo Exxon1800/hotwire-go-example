@@ -21,14 +21,15 @@ type Page struct {
 }
 
 type PaginateDataStruct struct {
-	Draw            string `json:"draw"`
-	RecordsTotal    int    `json:"recordsTotal"`
-	RecordsFiltered int    `json:"recordsFiltered"`
-	Data            []Room `json:"data"`
+	Draw            string              `json:"draw"`
+	RecordsTotal    int                 `json:"recordsTotal"`
+	RecordsFiltered int                 `json:"recordsFiltered"`
+	Data            []map[string]string `json:"data"`
 }
 
-type Room struct {
-	Name string `json:"name"`
+type dataTablesField struct {
+	dtName       string
+	databaseName string
 }
 
 var db *gorm.DB
@@ -46,11 +47,7 @@ func main() {
 }
 
 // search function returns the result of the query
-func search(field string, args []interface{}) (dataList []Room, err error) {
-	var room Room
-	//query = `SELECT name FROM rooms WHERE name LIKE ? ORDER BY name Limit ? , ?;`
-	//rows, err := db.Raw(query, args...).Rows()
-
+func search(sortingField dataTablesField, dtFields []dataTablesField, tableName string, args []interface{}) (dataList []map[string]string, err error) {
 	var (
 		rows                *sql.Rows
 		noSearchValueInArgs = 2
@@ -65,10 +62,10 @@ func search(field string, args []interface{}) (dataList []Room, err error) {
 		}
 
 		rows, err = db.Debug().
-			Model(&models.Room{}).
-			Select(field).
-			Where(fmt.Sprintf("%s LIKE ?", field), args...).
-			Order(field).
+			Table(tableName).
+			Select(sortingField.databaseName).
+			Where(fmt.Sprintf("%s LIKE ?", sortingField.databaseName), args...).
+			Order(sortingField.databaseName).
 			Offset(offset).
 			Limit(limit).
 			Rows()
@@ -82,9 +79,9 @@ func search(field string, args []interface{}) (dataList []Room, err error) {
 		}
 
 		rows, err = db.Debug().
-			Model(&models.Room{}).
-			Select(field).
-			Order(field).
+			Table(tableName).
+			Select(sortingField.databaseName).
+			Order(sortingField.databaseName).
 			Offset(offset).
 			Limit(limit).
 			Rows()
@@ -136,15 +133,13 @@ func search(field string, args []interface{}) (dataList []Room, err error) {
 				value = string(col)
 			}
 
-			switch columns[i] {
-			case "name":
-				room.Name = value
-			case "id":
-				room.Name = value
+			for _, dtField := range dtFields {
+				if dtField.databaseName == columns[i] {
+					dtObject := map[string]string{dtField.dtName: value}
+					dataList = append(dataList, dtObject)
+				}
 			}
 		}
-
-		dataList = append(dataList, room)
 	}
 
 	return dataList, nil
@@ -167,17 +162,18 @@ func getLimitAndOffset(args []interface{}) (int, int, error) {
 var final int
 
 func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
-	err := paging(w, r, []string{"name"})
+	err := paging(w, r, "rooms", []dataTablesField{{"name", "name"}})
 	if err != nil {
 		panic(err)
 	}
 }
 
-func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) error {
+func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields []dataTablesField) error {
 	var (
 		pagingData PaginateDataStruct
-		result     []Room
+		result     []map[string]string
 		args       []interface{}
+		firstDraw  = "1"
 	)
 
 	err := r.ParseForm()
@@ -190,8 +186,8 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 	draw := r.FormValue("draw")
 	searchValue := r.FormValue("search[value]")
 
-	if draw == "1" {
-		rows, err := db.Model(&models.Room{}).Select("COUNT(*)").Rows()
+	if draw == firstDraw {
+		rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
 		if err != nil {
 			return err
 		}
@@ -214,11 +210,11 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 	}
 
 	if searchValue != "" {
-		//query = `SELECT name FROM rooms WHERE name LIKE ? ORDER BY name Limit ? , ?;`
 		p := searchValue + "%"
 		args = []interface{}{p, start, end}
 		aux := []interface{}{p}
-		result, err = search(dataTablesFields[0], args)
+
+		result, err = search(dtFields[0], dtFields, tableName, args)
 		if err != nil {
 			return err
 		}
@@ -227,8 +223,8 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 		rows, err := db.Debug().
 			Model(&models.Room{}).
 			Select("COUNT(*)").
-			Where(generateDTWhereQuery(dataTablesFields), aux...).
-			Order(dataTablesFields[0]).
+			Where(generateDTWhereQuery(dtFields), aux...).
+			Order(dtFields[0].databaseName).
 			Rows()
 		if err != nil {
 			return err
@@ -251,11 +247,8 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 			}
 		}
 	} else {
-		//query = `SELECT name FROM rooms
-		//	ORDER BY name
-		//	Limit ? , ?;`
 		args = []interface{}{start, end}
-		result, err = search(dataTablesFields[0], args)
+		result, err = search(dtFields[0], dtFields, tableName, args)
 		if err != nil {
 			return err
 		}
@@ -265,7 +258,7 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 	pagingData.Draw = draw
 	pagingData.RecordsFiltered = final
 
-	e, err := json.Marshal(pagingData)
+	jsonData, err := json.Marshal(pagingData)
 	if err != nil {
 		return err
 	}
@@ -273,7 +266,7 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	_, err = w.Write(e)
+	_, err = w.Write(jsonData)
 	if err != nil {
 		return err
 	}
@@ -281,11 +274,11 @@ func paging(w http.ResponseWriter, r *http.Request, dataTablesFields []string) e
 	return nil
 }
 
-func generateDTWhereQuery(dataTablesFields []string) string {
-	whereQuery := fmt.Sprintf("%s like ? ", dataTablesFields[0])
+func generateDTWhereQuery(dtFields []dataTablesField) string {
+	whereQuery := fmt.Sprintf("%s like ? ", dtFields[0].databaseName)
 
-	for _, field := range dataTablesFields[1:] {
-		whereQuery += fmt.Sprintf("OR %s like ? ", field)
+	for _, field := range dtFields[1:] {
+		whereQuery += fmt.Sprintf("OR %s like ? ", field.databaseName)
 	}
 
 	return whereQuery
@@ -303,31 +296,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	ifErrorToPage(w, r, err)
 }
 
-func setupDB() *gorm.DB {
-	db, err := gorm.Open(sqlite.Open("chat.db"), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true,
-	})
-	if err != nil {
-		log.Fatalf("Fatal error: %v", err)
-	}
-
-	log.Println("Running migrations")
-
-	err = models.Migrate()
-	if err != nil {
-		log.Fatalf("Fatal error: %v", err)
-	}
-
-	log.Println("Seeding database")
-
-	err = models.Seed()
-	if err != nil {
-		log.Fatalf("Fatal error: %v", err)
-	}
-
-	return db
-}
-
+// TODO only for this test setup
 func ifErrorToPage(w io.Writer, r *http.Request, err error) {
 	if err != nil {
 		t, err := template.ParseFiles("templates/Error.html")
@@ -358,4 +327,29 @@ func logError(r *http.Request, err error) *log.Entry {
 
 func GetLogger(r *http.Request) *log.Entry {
 	return r.Context().Value("logger").(*log.Entry)
+}
+
+func setupDB() *gorm.DB {
+	db, err := gorm.Open(sqlite.Open("chat.db"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		log.Fatalf("Fatal error: %v", err)
+	}
+
+	log.Println("Running migrations")
+
+	err = models.Migrate()
+	if err != nil {
+		log.Fatalf("Fatal error: %v", err)
+	}
+
+	log.Println("Seeding database")
+
+	err = models.Seed()
+	if err != nil {
+		log.Fatalf("Fatal error: %v", err)
+	}
+
+	return db
 }
