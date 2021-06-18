@@ -32,6 +32,7 @@ type dataTablesField struct {
 	databaseName string
 }
 
+var final int
 var db *gorm.DB
 
 func main() {
@@ -44,6 +45,145 @@ func main() {
 	r.HandleFunc("/populateDataTable", pagingHandler).Methods("POST")
 	http.Handle("/", r)
 	_ = http.ListenAndServe(":8080", nil)
+}
+
+func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
+	err := pagination(w, r, "rooms", []dataTablesField{{"name", "name"}})
+	if err != nil {
+		panic(err)
+	}
+}
+
+// pagination is responsible for the datatables pagination
+func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFields []dataTablesField) error {
+	var (
+		pagingData PaginateDataStruct
+		args       []interface{}
+		firstDraw  = "1"
+	)
+
+	err := r.ParseForm()
+	if err != nil {
+		return fmt.Errorf("could not parse form %w", err)
+	}
+
+	start := r.FormValue("start")
+	end := r.FormValue("length")
+	draw := r.FormValue("draw")
+	searchValue := r.FormValue("search[value]")
+
+	if draw == firstDraw {
+		err := getFirstDrawResults(tableName)
+		if err != nil {
+			return err
+		}
+	}
+
+	if searchValue != "" {
+		pagingData.Data, err = getNonFilteredResults(searchValue, args, start, end, dtFields, tableName)
+		if err != nil {
+			return err
+		}
+	} else {
+		pagingData.Data, err = getFilteredResults(args, start, end, dtFields, tableName)
+		if err != nil {
+			return err
+		}
+	}
+
+	pagingData.Draw = draw
+	pagingData.RecordsFiltered = final
+
+	jsonData, err := json.Marshal(pagingData)
+	if err != nil {
+		return fmt.Errorf("could not marshal pagingData %w", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	_, err = w.Write(jsonData)
+	if err != nil {
+		return fmt.Errorf("could not write json data to the connection %w", err)
+	}
+
+	return nil
+}
+
+func getFilteredResults(args []interface{}, start string, end string, dtFields []dataTablesField, tableName string) ([]map[string]string, error) {
+	var result []map[string]string
+	args = []interface{}{start, end}
+	result, err := search(dtFields[0], dtFields, tableName, args)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func getNonFilteredResults(searchValue string, args []interface{}, start string, end string, dtFields []dataTablesField, tableName string) ([]map[string]string, error) {
+	var result []map[string]string
+	p := searchValue + "%"
+	args = []interface{}{p, start, end}
+	aux := []interface{}{p}
+
+	result, err := search(dtFields[0], dtFields, tableName, args)
+	if err != nil {
+		return nil, err
+	}
+
+	// Here we obtain the number of results
+	rows, err := db.Debug().
+		Model(&models.Room{}).
+		Select("COUNT(*)").
+		Where(generateDTWhereQuery(dtFields), aux...).
+		Order(dtFields[0].databaseName).
+		Rows()
+	if err != nil {
+		return nil, fmt.Errorf("could not execute query to get the number of results %w", err)
+	}
+
+	defer func() {
+		_ = rows.Close()
+
+		err = rows.Err()
+	}()
+
+	if err != nil {
+		return nil, fmt.Errorf("row error occurred %w", err)
+	}
+
+	for rows.Next() {
+		err = rows.Scan(&final)
+		if err != nil {
+			return nil, fmt.Errorf("could not scan row to &final %w", err)
+		}
+	}
+	return result, err
+}
+
+func getFirstDrawResults(tableName string) error {
+	rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
+	if err != nil {
+		return fmt.Errorf("could not execute query to get the rowcount of the entire '%v' table %w", tableName, err)
+	}
+
+	defer func() {
+		_ = rows.Close()
+
+		err = rows.Err()
+	}()
+
+	if err != nil {
+		return fmt.Errorf("row error occurred %w", err)
+	}
+
+	for rows.Next() {
+		err = rows.Scan(&final)
+		if err != nil {
+			return fmt.Errorf("could not scan row to &final %w", err)
+		}
+	}
+	return nil
 }
 
 // search function returns the result of the query
@@ -145,6 +285,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 	return dataList, nil
 }
 
+// getLimitAndOffset gets the limit and offset out of the args passed in the post request created by datatables
 func getLimitAndOffset(args []interface{}) (int, int, error) {
 	limit, err := strconv.Atoi(fmt.Sprintf("%v", args[len(args)-1]))
 	if err != nil {
@@ -159,122 +300,7 @@ func getLimitAndOffset(args []interface{}) (int, int, error) {
 	return limit, offset, nil
 }
 
-var final int
-
-func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
-	err := paging(w, r, "rooms", []dataTablesField{{"name", "name"}})
-	if err != nil {
-		panic(err)
-	}
-}
-
-func paging(w http.ResponseWriter, r *http.Request, tableName string, dtFields []dataTablesField) error {
-	var (
-		pagingData PaginateDataStruct
-		result     []map[string]string
-		args       []interface{}
-		firstDraw  = "1"
-	)
-
-	err := r.ParseForm()
-	if err != nil {
-		return fmt.Errorf("could not parse form %w", err)
-	}
-
-	start := r.FormValue("start")
-	end := r.FormValue("length")
-	draw := r.FormValue("draw")
-	searchValue := r.FormValue("search[value]")
-
-	if draw == firstDraw {
-		rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
-		if err != nil {
-			return fmt.Errorf("could not execute query to get the rowcount of the entire '%v' table %w", tableName, err)
-		}
-
-		defer func() {
-			_ = rows.Close()
-
-			err = rows.Err()
-		}()
-
-		if err != nil {
-			return fmt.Errorf("row error occurred %w", err)
-		}
-
-		for rows.Next() {
-			err = rows.Scan(&final)
-			if err != nil {
-				return fmt.Errorf("could not scan row to &final %w", err)
-			}
-		}
-	}
-
-	if searchValue != "" {
-		p := searchValue + "%"
-		args = []interface{}{p, start, end}
-		aux := []interface{}{p}
-
-		result, err = search(dtFields[0], dtFields, tableName, args)
-		if err != nil {
-			return err
-		}
-
-		// Here we obtain the number of results
-		rows, err := db.Debug().
-			Model(&models.Room{}).
-			Select("COUNT(*)").
-			Where(generateDTWhereQuery(dtFields), aux...).
-			Order(dtFields[0].databaseName).
-			Rows()
-		if err != nil {
-			return fmt.Errorf("could not execute query to get the number of results %w", err)
-		}
-
-		defer func() {
-			_ = rows.Close()
-
-			err = rows.Err()
-		}()
-
-		if err != nil {
-			return fmt.Errorf("row error occurred %w", err)
-		}
-
-		for rows.Next() {
-			err = rows.Scan(&final)
-			if err != nil {
-				return fmt.Errorf("could not scan row to &final %w", err)
-			}
-		}
-	} else {
-		args = []interface{}{start, end}
-		result, err = search(dtFields[0], dtFields, tableName, args)
-		if err != nil {
-			return err
-		}
-	}
-
-	pagingData.Data = result
-	pagingData.Draw = draw
-	pagingData.RecordsFiltered = final
-
-	jsonData, err := json.Marshal(pagingData)
-	if err != nil {
-		return fmt.Errorf("could not marshal pagingData %w", err)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	_, err = w.Write(jsonData)
-	if err != nil {
-		return fmt.Errorf("could not write json data to the connection %w", err)
-	}
-
-	return nil
-}
-
+// generateDTWhereQuery generates the WHERE part of the queries used for the dataTables pagination
 func generateDTWhereQuery(dtFields []dataTablesField) string {
 	whereQuery := fmt.Sprintf("%s like ? ", dtFields[0].databaseName)
 
@@ -285,6 +311,7 @@ func generateDTWhereQuery(dtFields []dataTablesField) string {
 	return whereQuery
 }
 
+//nolint:godox    // TODO only for this test setup
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	p := Page{
 		Title: "pagination",
@@ -297,7 +324,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	ifErrorToPage(w, r, err)
 }
 
-// TODO only for this test setup
 func ifErrorToPage(w io.Writer, r *http.Request, err error) {
 	if err != nil {
 		t, err := template.ParseFiles("templates/Error.html")
