@@ -28,7 +28,7 @@ type PaginateDataStruct struct {
 }
 
 type dataTablesField struct {
-	dtName       string
+	dtColumnName string
 	databaseName string
 }
 
@@ -58,7 +58,6 @@ func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
 func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFields []dataTablesField) error {
 	var (
 		pagingData PaginateDataStruct
-		args       []interface{}
 		firstDraw  = "1"
 	)
 
@@ -80,12 +79,12 @@ func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFiel
 	}
 
 	if searchValue != "" {
-		pagingData.Data, err = getNonFilteredResults(searchValue, args, start, end, dtFields, tableName)
+		pagingData.Data, err = getNonFilteredResults(searchValue, start, end, dtFields, tableName)
 		if err != nil {
 			return err
 		}
 	} else {
-		pagingData.Data, err = getFilteredResults(args, start, end, dtFields, tableName)
+		pagingData.Data, err = getFilteredResults([]interface{}{start, end}, dtFields, tableName)
 		if err != nil {
 			return err
 		}
@@ -110,36 +109,59 @@ func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFiel
 	return nil
 }
 
-func getFilteredResults(args []interface{}, start string, end string, dtFields []dataTablesField, tableName string) ([]map[string]string, error) {
-	var result []map[string]string
-	args = []interface{}{start, end}
+// getFilteredResults will get the results where the search-box on the front-end contains a search value
+func getFilteredResults(args []interface{}, dtFields []dataTablesField, tableName string) ([]map[string]string, error) {
+	var (
+		result []map[string]string
+		p      = "%"
+		aux    = []interface{}{p}
+	)
+
 	result, err := search(dtFields[0], dtFields, tableName, args)
 	if err != nil {
 		return nil, err
 	}
+
+	err = getNumberOfResults(err, dtFields, aux)
+	if err != nil {
+		return nil, err
+	}
+
 	return result, nil
 }
 
-func getNonFilteredResults(searchValue string, args []interface{}, start string, end string, dtFields []dataTablesField, tableName string) ([]map[string]string, error) {
-	var result []map[string]string
-	p := searchValue + "%"
-	args = []interface{}{p, start, end}
-	aux := []interface{}{p}
+// getNonFilteredResults will get the results where the search-box on the front-end is empty
+func getNonFilteredResults(
+	searchValue string, start string, end string, dtFields []dataTablesField, tableName string,
+) ([]map[string]string, error) {
+	var (
+		p    = searchValue + "%"
+		args = []interface{}{p, start, end}
+		aux  = []interface{}{p}
+	)
 
 	result, err := search(dtFields[0], dtFields, tableName, args)
 	if err != nil {
 		return nil, err
 	}
 
-	// Here we obtain the number of results
-	rows, err := db.Debug().
-		Model(&models.Room{}).
+	err = getNumberOfResults(err, dtFields, aux)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, err
+}
+
+// getNumberOfResults obtains the number of results/entries in the dataTable
+func getNumberOfResults(err error, dtFields []dataTablesField, aux []interface{}) error {
+	rows, err := db.Model(&models.Room{}).
 		Select("COUNT(*)").
 		Where(generateDTWhereQuery(dtFields), aux...).
 		Order(dtFields[0].databaseName).
 		Rows()
 	if err != nil {
-		return nil, fmt.Errorf("could not execute query to get the number of results %w", err)
+		return fmt.Errorf("could not execute query to get the number of results %w", err)
 	}
 
 	defer func() {
@@ -149,18 +171,20 @@ func getNonFilteredResults(searchValue string, args []interface{}, start string,
 	}()
 
 	if err != nil {
-		return nil, fmt.Errorf("row error occurred %w", err)
+		return fmt.Errorf("row error occurred %w", err)
 	}
 
 	for rows.Next() {
 		err = rows.Scan(&final)
 		if err != nil {
-			return nil, fmt.Errorf("could not scan row to &final %w", err)
+			return fmt.Errorf("could not scan row to &final %w", err)
 		}
 	}
-	return result, err
+
+	return nil
 }
 
+// getFirstDrawResults gets the result for the first draw of the datatables/first load of the page
 func getFirstDrawResults(tableName string) error {
 	rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
 	if err != nil {
@@ -183,50 +207,31 @@ func getFirstDrawResults(tableName string) error {
 			return fmt.Errorf("could not scan row to &final %w", err)
 		}
 	}
+
 	return nil
 }
 
 // search function returns the result of the query
-func search(sortingField dataTablesField, dtFields []dataTablesField, tableName string, args []interface{}) (dataList []map[string]string, err error) {
+func search(
+	sortingField dataTablesField, dtFields []dataTablesField, tableName string, args []interface{},
+) ([]map[string]string, error) {
 	var (
-		rows                *sql.Rows
-		noSearchValueInArgs = 2
-		searchValueInArgs   = 3
+		err                    error
+		rows                   *sql.Rows
+		noSearchArgumentInArgs = 2
+		searchArgumentInArgs   = 3
 	)
 
 	switch len(args) {
-	case searchValueInArgs:
-		limit, offset, err := getLimitAndOffset(args)
+	case searchArgumentInArgs:
+		rows, err = getResultRows(sortingField, args, tableName)
 		if err != nil {
 			return nil, err
 		}
-
-		rows, err = db.
-			Table(tableName).
-			Select(sortingField.databaseName).
-			Where(fmt.Sprintf("%s LIKE ?", sortingField.databaseName), args...).
-			Order(sortingField.databaseName).
-			Offset(offset).
-			Limit(limit).
-			Rows()
-		if err != nil {
-			return nil, fmt.Errorf("could not execute filtered search query %w", err)
-		}
-	case noSearchValueInArgs:
-		limit, offset, err := getLimitAndOffset(args)
+	case noSearchArgumentInArgs:
+		rows, err = getResultRowsWithSearchArguments(sortingField, args, tableName)
 		if err != nil {
 			return nil, err
-		}
-
-		rows, err = db.Debug().
-			Table(tableName).
-			Select(sortingField.databaseName).
-			Order(sortingField.databaseName).
-			Offset(offset).
-			Limit(limit).
-			Rows()
-		if err != nil {
-			return nil, fmt.Errorf("could not execute search query %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("incorrect argument list size for args %v", args)
@@ -241,6 +246,19 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 	if err != nil {
 		return nil, fmt.Errorf("row error occurred %w", err)
 	}
+
+	paginationDataList, err := databaseRowsToPaginationDataList(rows, dtFields)
+	if err != nil {
+		return nil, err
+	}
+
+	return paginationDataList, nil
+}
+
+// databaseRowsToPaginationDataList converts the result rows to a map
+// this map will only contain fields found in the dataTablesField.dtColumnName (columns that are used in the dataTablet)
+func databaseRowsToPaginationDataList(rows *sql.Rows, dtFields []dataTablesField) ([]map[string]string, error) {
+	var dataList []map[string]string
 
 	columns, err := rows.Columns()
 	if err != nil {
@@ -260,7 +278,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 		// get RawBytes from data
 		err = rows.Scan(scanArgs...)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("could not scan rows to 'scanArgs...' %w", err)
 		}
 
 		var value string
@@ -275,7 +293,7 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 
 			for _, dtField := range dtFields {
 				if dtField.databaseName == columns[i] {
-					dtObject := map[string]string{dtField.dtName: value}
+					dtObject := map[string]string{dtField.dtColumnName: value}
 					dataList = append(dataList, dtObject)
 				}
 			}
@@ -283,6 +301,50 @@ func search(sortingField dataTablesField, dtFields []dataTablesField, tableName 
 	}
 
 	return dataList, nil
+}
+
+// getResultRows gets the results from the database
+// using search arguments from the datatables search-box in the WHERE of the query
+func getResultRowsWithSearchArguments(
+	sortingField dataTablesField, args []interface{}, tableName string,
+) (*sql.Rows, error) {
+	limit, offset, err := getLimitAndOffset(args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Table(tableName).
+		Select(sortingField.databaseName).
+		Order(sortingField.databaseName).
+		Offset(offset).
+		Limit(limit).
+		Rows()
+	if err != nil {
+		return nil, fmt.Errorf("could not execute search query %w", err)
+	}
+
+	return rows, nil
+}
+
+// getResultRows gets the results from the database
+func getResultRows(sortingField dataTablesField, args []interface{}, tableName string) (*sql.Rows, error) {
+	limit, offset, err := getLimitAndOffset(args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Table(tableName).
+		Select(sortingField.databaseName).
+		Where(fmt.Sprintf("%s LIKE ?", sortingField.databaseName), args...).
+		Order(sortingField.databaseName).
+		Offset(offset).
+		Limit(limit).
+		Rows()
+	if err != nil {
+		return nil, fmt.Errorf("could not execute filtered search query %w", err)
+	}
+
+	return rows, nil
 }
 
 // getLimitAndOffset gets the limit and offset out of the args passed in the post request created by datatables
@@ -311,7 +373,7 @@ func generateDTWhereQuery(dtFields []dataTablesField) string {
 	return whereQuery
 }
 
-//nolint:godox    // TODO only for this test setup
+//nolint:nolintlint,godox    // TODO only for this test setup!
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	p := Page{
 		Title: "pagination",
