@@ -14,6 +14,10 @@ import (
 	"net/http"
 	"strconv"
 )
+//todo: fix (filtered from 0 total entries) not counting
+//todo: fix only being able the search the from first letter to last
+//todo: test models with multiple fields
+
 
 type Page struct {
 	Title string
