@@ -19,10 +19,7 @@ import (
 //todo: fix only being able the search the from first letter to last
 //todo: test models with multiple fields
 
-type Page struct {
-	Title string
-	Body  string
-}
+// todo: description
 
 type PaginateDataStruct struct {
 	Draw            string              `json:"draw"`
@@ -31,35 +28,39 @@ type PaginateDataStruct struct {
 	Data            []map[string]string `json:"data"`
 }
 
-type dataTablesColumns struct {
+type dtPaginationData struct {
+	db              *gorm.DB
+	tableName       string
+	dtColumns       []dtColumn
+	dtSortingColumn dtColumn
+}
+
+type dtColumn struct {
 	dtColumnName string
-	databaseName string
+	dbColumnName string
 }
 
 var final int
-var db *gorm.DB
 
-func main() {
-	log.Println("Starting app")
-
-	db = setupDB()
-
-	r := mux.NewRouter()
-	r.HandleFunc("/", indexHandler).Methods("GET")
-	r.HandleFunc("/populateDataTable", pagingHandler).Methods("POST")
-	http.Handle("/", r)
-	_ = http.ListenAndServe(":8080", nil)
+type Page struct {
+	Title string
+	Body  string
 }
 
-func pagingHandler(w http.ResponseWriter, r *http.Request, ) {
-	err := pagination(w, r, "rooms", []dataTablesColumns{{"name", "name"}})
+func pagingHandler(w http.ResponseWriter, r *http.Request) {
+	err := pagination(w, r, dtPaginationData{
+		db,
+		"rooms",
+		[]dtColumn{{"name", "name"}},
+		dtColumn{"name", "name"},
+	})
 	if err != nil {
 		panic(err)
 	}
 }
 
 // pagination is responsible for the datatables pagination
-func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFields []dataTablesColumns) error {
+func pagination(w http.ResponseWriter, r *http.Request, dtData dtPaginationData) error {
 	var (
 		pagingData PaginateDataStruct
 		firstDraw  = "1"
@@ -76,19 +77,19 @@ func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFiel
 	searchValue := r.FormValue("search[value]")
 
 	if draw == firstDraw {
-		err = getFirstDrawResults(tableName)
+		err = getFirstDrawResults(dtData)
 		if err != nil {
 			return err
 		}
 	}
 
 	if searchValue != "" {
-		pagingData.Data, err = getNonFilteredResults(searchValue, start, end, dtFields, tableName)
+		pagingData.Data, err = getNonFilteredResults(searchValue, start, end, dtData)
 		if err != nil {
 			return err
 		}
 	} else {
-		pagingData.Data, err = getFilteredResults([]interface{}{start, end}, dtFields, tableName)
+		pagingData.Data, err = getFilteredResults([]interface{}{start, end}, dtData)
 		if err != nil {
 			return err
 		}
@@ -114,19 +115,19 @@ func pagination(w http.ResponseWriter, r *http.Request, tableName string, dtFiel
 }
 
 // getFilteredResults will get the results where the search-box on the front-end contains a search value
-func getFilteredResults(args []interface{}, dtFields []dataTablesColumns, tableName string) ([]map[string]string, error) { //nolint:lll
+func getFilteredResults(args []interface{}, dtData dtPaginationData) ([]map[string]string, error) { //nolint:lll
 	var (
 		result []map[string]string
 		p      = "%"
 		aux    = []interface{}{p}
 	)
 
-	result, err := search(dtFields[0], dtFields, tableName, args)
+	result, err := search(dtData, args)
 	if err != nil {
 		return nil, err
 	}
 
-	err = getNumberOfResults(err, dtFields, aux)
+	err = getNumberOfResults(dtData, aux)
 	if err != nil {
 		return nil, err
 	}
@@ -135,21 +136,19 @@ func getFilteredResults(args []interface{}, dtFields []dataTablesColumns, tableN
 }
 
 // getNonFilteredResults will get the results where the search-box on the front-end is empty
-func getNonFilteredResults(
-	searchValue string, start string, end string, dtFields []dataTablesColumns, tableName string,
-) ([]map[string]string, error) {
+func getNonFilteredResults(searchValue string, start string, end string, dtData dtPaginationData) ([]map[string]string, error) {
 	var (
 		p    = searchValue + "%"
 		args = []interface{}{p, start, end}
 		aux  = []interface{}{p}
 	)
 
-	result, err := search(dtFields[0], dtFields, tableName, args)
+	result, err := search(dtData, args)
 	if err != nil {
 		return nil, err
 	}
 
-	err = getNumberOfResults(err, dtFields, aux)
+	err = getNumberOfResults(dtData, aux)
 	if err != nil {
 		return nil, err
 	}
@@ -158,11 +157,11 @@ func getNonFilteredResults(
 }
 
 // getNumberOfResults obtains the number of results/entries in the dataTable
-func getNumberOfResults(err error, dtFields []dataTablesColumns, aux []interface{}) error {
-	rows, err := db.Model(&models.Room{}).
+func getNumberOfResults(dtData dtPaginationData, aux []interface{}) error {
+	rows, err := dtData.db.Table(dtData.tableName).
 		Select("COUNT(*)").
-		Where(generateDTWhereQuery(dtFields), aux...).
-		Order(dtFields[0].databaseName).
+		Where(generateDTWhereQuery(dtData.dtColumns), aux...).
+		Order(dtData.dtSortingColumn.dbColumnName).
 		Rows()
 	if err != nil {
 		return fmt.Errorf("could not execute query to get the number of results %w", err)
@@ -189,10 +188,12 @@ func getNumberOfResults(err error, dtFields []dataTablesColumns, aux []interface
 }
 
 // getFirstDrawResults gets the result for the first draw of the datatables/first load of the page
-func getFirstDrawResults(tableName string) error {
-	rows, err := db.Table(tableName).Select("COUNT(*)").Rows()
+func getFirstDrawResults(dtData dtPaginationData) error {
+	rows, err := dtData.db.Table(dtData.tableName).Select("COUNT(*)").Rows()
 	if err != nil {
-		return fmt.Errorf("could not execute query to get the rowcount of the entire '%v' table %w", tableName, err)
+		return fmt.Errorf(
+			"could not execute query to get the rowcount of the entire '%v' table %w", dtData.tableName, err,
+		)
 	}
 
 	defer func() {
@@ -216,9 +217,7 @@ func getFirstDrawResults(tableName string) error {
 }
 
 // search function returns the result of the query
-func search(
-	sortingField dataTablesColumns, dtFields []dataTablesColumns, tableName string, args []interface{},
-) ([]map[string]string, error) {
+func search(dtData dtPaginationData, args []interface{}) ([]map[string]string, error) {
 	var (
 		err                    error
 		rows                   *sql.Rows
@@ -228,12 +227,12 @@ func search(
 
 	switch len(args) {
 	case searchArgumentInArgs:
-		rows, err = getResultRows(sortingField, args, tableName)
+		rows, err = getResultRows(dtData, args)
 		if err != nil {
 			return nil, err
 		}
 	case noSearchArgumentInArgs:
-		rows, err = getResultRowsWithSearchArguments(sortingField, args, tableName)
+		rows, err = getResultRowsWithSearchArguments(dtData, args)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +250,7 @@ func search(
 		return nil, fmt.Errorf("row error occurred %w", err)
 	}
 
-	paginationDataList, err := databaseRowsToPaginationDataList(rows, dtFields)
+	paginationDataList, err := databaseRowsToPaginationDataList(rows, dtData.dtColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +259,8 @@ func search(
 }
 
 // databaseRowsToPaginationDataList converts the result rows to a map
-// this map will contain results for the in the dataTablesColumns.dtColumnName (columns that are used in the dataTablet)
-func databaseRowsToPaginationDataList(rows *sql.Rows, dtFields []dataTablesColumns) ([]map[string]string, error) {
+// this map will contain results for the in the dtColumn.dtColumnName (columns that are used in the dataTablet)
+func databaseRowsToPaginationDataList(rows *sql.Rows, dtFields []dtColumn) ([]map[string]string, error) {
 	var dataList []map[string]string
 
 	columns, err := rows.Columns()
@@ -296,7 +295,7 @@ func databaseRowsToPaginationDataList(rows *sql.Rows, dtFields []dataTablesColum
 			}
 
 			for _, dtField := range dtFields {
-				if dtField.databaseName == columns[i] {
+				if dtField.dbColumnName == columns[i] {
 					dtObject := map[string]string{dtField.dtColumnName: value}
 					dataList = append(dataList, dtObject)
 				}
@@ -309,17 +308,15 @@ func databaseRowsToPaginationDataList(rows *sql.Rows, dtFields []dataTablesColum
 
 // getResultRows gets the results from the database
 // using search arguments from the datatables search-box in the WHERE of the query
-func getResultRowsWithSearchArguments(
-	sortingField dataTablesColumns, args []interface{}, tableName string,
-) (*sql.Rows, error) {
+func getResultRowsWithSearchArguments(dtData dtPaginationData, args []interface{}) (*sql.Rows, error) {
 	limit, offset, err := getLimitAndOffset(args)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := db.Table(tableName).
-		Select(sortingField.databaseName).
-		Order(sortingField.databaseName).
+	rows, err := dtData.db.Table(dtData.tableName).
+		Select(dtData.dtSortingColumn.dbColumnName).
+		Order(dtData.dtSortingColumn.dbColumnName).
 		Offset(offset).
 		Limit(limit).
 		Rows()
@@ -331,16 +328,16 @@ func getResultRowsWithSearchArguments(
 }
 
 // getResultRows gets the results from the database
-func getResultRows(sortingField dataTablesColumns, args []interface{}, tableName string) (*sql.Rows, error) {
+func getResultRows(dtData dtPaginationData, args []interface{}) (*sql.Rows, error) {
 	limit, offset, err := getLimitAndOffset(args)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := db.Table(tableName).
-		Select(sortingField.databaseName).
-		Where(fmt.Sprintf("%s LIKE ?", sortingField.databaseName), args...).
-		Order(sortingField.databaseName).
+	rows, err := dtData.db.Table(dtData.tableName).
+		Select(dtData.dtSortingColumn.dbColumnName).
+		Where(fmt.Sprintf("%s LIKE ?", dtData.dtSortingColumn.dbColumnName), args...).
+		Order(dtData.dtSortingColumn.dbColumnName).
 		Offset(offset).
 		Limit(limit).
 		Rows()
@@ -367,17 +364,32 @@ func getLimitAndOffset(args []interface{}) (int, int, error) {
 }
 
 // generateDTWhereQuery generates the WHERE part of the queries used for the dataTables pagination
-func generateDTWhereQuery(dtFields []dataTablesColumns) string {
-	whereQuery := fmt.Sprintf("%s like ? ", dtFields[0].databaseName)
+func generateDTWhereQuery(dtFields []dtColumn) string {
+	whereQuery := fmt.Sprintf("%s like ? ", dtFields[0].dbColumnName)
 
 	for _, field := range dtFields[1:] {
-		whereQuery += fmt.Sprintf("OR %s like ? ", field.databaseName)
+		whereQuery += fmt.Sprintf("OR %s like ? ", field.dbColumnName)
 	}
 
 	return whereQuery
 }
 
 //nolint:nolintlint,godox    // TODO only for this test setup!
+
+var db *gorm.DB
+
+func main() {
+	log.Println("Starting app")
+
+	db = setupDB()
+
+	r := mux.NewRouter()
+	r.HandleFunc("/", indexHandler).Methods("GET")
+	r.HandleFunc("/populateDataTable", pagingHandler).Methods("POST")
+	http.Handle("/", r)
+	_ = http.ListenAndServe(":8080", nil)
+}
+
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	p := Page{
 		Title: "pagination",
